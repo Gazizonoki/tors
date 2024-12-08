@@ -1,0 +1,12 @@
+{
+    "election_timeout": 200,
+    "heartbeat_timeout": 30,
+    "request_timeout": 70,
+    "uncertainty_multiplier": 2,
+    "nodes": [
+        "localhost:8001",
+        "localhost:8002",
+        "localhost:8003"
+    ],
+    "data_dir": "./data"
+}
