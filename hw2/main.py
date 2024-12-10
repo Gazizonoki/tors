@@ -28,7 +28,7 @@ class Node:
         self.state = 'follower' # Possible states: 'leader', 'candidate', 'follower'
         self.leader_address = None
 
-        self.new_index = dict()
+        self.next_index = dict()
         self.match_index = dict()
 
         self.last_heartbeat = time.monotonic()
@@ -85,9 +85,7 @@ class Node:
                     if self.heartbeat_subscribe.wait_for(lambda : self.apply_count > (len(self.other_nodes) + 1) // 2, self.request_timeout):
                         return 'Timeout', 504
                     return 'Item deleted', 200
-                return 'Item not found', 404
-            logging.error("Lock acquire failed in delete_item")
-            return 'Internal error', 500
+            return 'Item not found', 404
 
         @app.route('/items/<string:item_id>', methods=['GET'])
         def get_item(item_id):
@@ -140,16 +138,15 @@ class Node:
 
     def send_append_entries(self, node, timeout):
         try:
-            
             while True:
+                prev_log_term, entries = self.storage.get_log_tail(self.next_index[node] - 1)
                 params = {
                     "term": self.storage.term(),
                     "leader_id": self.address,
                     "leader_commit": self.storage.commit_index,
-                    "prev_log_index": ???,
-                    "prev_log_term": ???,
+                    "prev_log_index": self.next_index[node] - 1,
+                    "prev_log_term": prev_log_term,
                 }
-                entries = bytes()
                 response = requests.get(f'http://{node}/append_entries', params=params, data=entries, timeout=timeout)
                 data = response.json()
                 if data.get('term') > self.storage.term():
@@ -159,8 +156,12 @@ class Node:
                         self.apply_count += 1
                         self.heartbeat_subscribe.notify_all()
                     break
+                else:
+                    if self.next_index[node] == 0:
+                        raise RuntimeError(f"Cannot replicate log from {self.address} to node at term {self.storage.term()}")
+                    self.next_index[node] -= 1
         except Exception as e:
-            logging.warning(f"AppendEntries at term {self.storage.term()} to {node} failed: {e}")
+            logging.error(f"AppendEntries at term {self.storage.term()} to {node} failed: {e}")
 
     def start_heartbeat(self):
         while True:
@@ -188,17 +189,17 @@ class Node:
     def become_follower(self):
         self.state = "follower"
         self.match_index.clear()
-        self.new_index.clear()
+        self.next_index.clear()
 
     def become_leader(self):
         logging.info(f"{self.address} becomes the new master for term {self.storage.term()}")
         self.state = "leader"
         self.master_address = self.address
         self.match_index.clear()
-        self.new_index.clear()
+        self.next_index.clear()
         for node in self.other_nodes:
             self.match_index[node] = 0
-            self.new_index[node] = self.storage.last_index() + 1
+            self.next_index[node] = self.storage.last_index() + 1
 
         with self.heartbeat_trigger:
             self.heartbeat_trigger.notify_all()
