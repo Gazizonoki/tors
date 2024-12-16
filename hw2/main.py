@@ -1,9 +1,9 @@
-import sys
 from flask import Flask, request, jsonify, redirect
 import logging
 import requests
 import threading
 import os
+import json
 import uuid
 import time
 import random
@@ -17,11 +17,11 @@ class Node:
         self.port = port
 
         self.other_nodes = config["nodes"].copy()
-        del self.other_nodes[self.address]
+        self.other_nodes.remove(self.address)
 
-        self.election_timeout = config["election_timeout"]
-        self.heartbeat_timeout = config["heartbeat_timeout"]
-        self.request_timeout = config["request_timeout"]
+        self.election_timeout = config["election_timeout_ms"]
+        self.heartbeat_timeout = config["heartbeat_timeout_ms"]
+        self.request_timeout = config["request_timeout_ms"]
         self.uncertainty_multiplier = float(config["uncertainty_multiplier"])
 
         self.storage = Storage(config["data_dir"])
@@ -101,40 +101,50 @@ class Node:
         @app.route('/append_entries', methods=['POST'])
         def append_entries():
             params = request.args
-            if params.get('term') < self.storage.term():
+            if int(params.get('term')) < self.storage.term():
                 return jsonify({'term': self.storage.term(), 'success': False}), 200
-            if self.state != 'follower':
+            self.validate_term(int(params.get('term')))
+            if self.state == 'candidate':
                 self.become_follower()
-            self.leader_address = params.get('leader_id')
+                self.leader_address = params.get('leader_id')
             success = False
-            if self.storage.rewrite_log_tail(params.get('prev_log_index'), params.get('prev_log_term'), request.data):
+            if self.storage.rewrite_log_tail(int(params.get('prev_log_index')), int(params.get('prev_log_term')),
+                                             int(params.get('leader_commit')), request.data):
                 success = True
-                if self.storage.commit_index < params.get('leader_commit'):
-                    self.storage.commit_index = min(self.storage.last_index(), params.get('leader_commit'))
-            self.storage.set_term(params.get('term'))
+                if self.storage.commit_index < int(params.get('leader_commit')):
+                    self.storage.commit_index = min(self.storage.last_index(), int(params.get('leader_commit')))
             return jsonify({'term': self.storage.term(), 'success': success}), 200
 
         @app.route('/request_vote', methods=['POST'])
         def request_vote():
             data = request.json
-            if data.get('term') < self.storage.term():
+            term = data.get('term')
+            if term < self.storage.term():
                 return jsonify({'term': self.storage.term(), 'vote_granted': False}), 200
+            self.validate_term(term)
             last_log_term = data.get('last_log_term')
             last_log_index = data.get('last_log_index')
             candidate_id = data.get('candidate_id')
             vote_granted = False
             if (self.storage.voted_for() is None or self.storage.voted_for() == candidate_id) \
                and (last_log_term, last_log_index) >= (self.storage.term(), self.storage.last_index()):
+                self.become_follower()
                 self.storage.set_voted_for(candidate_id)
                 vote_granted = True
-            self.storage.set_term(data.get('term'))
             return jsonify({'term': self.storage.term(), 'vote_granted': vote_granted}), 200
 
     def run(self):
         self.app.run(host='0.0.0.0', port=self.port)
 
     def get_biased_timeout_seconds(self, timeout):
-        return random.uniform(timeout, timeout * self.uncertainty_multiplier)
+        return random.uniform(timeout, timeout * self.uncertainty_multiplier) / 1000
+
+    def commit_log(self):
+        for new_commit_index in range(self.storage.last_index(), self.storage.commit_index, -1):
+            commited_cnt = sum(map(lambda x: int(x >= new_commit_index), self.match_index.values()))
+            if commited_cnt > (len(self.other_nodes) + 1) / 2:
+                self.storage.apply_entries(new_commit_index)
+                break
 
     def send_append_entries(self, node, timeout):
         try:
@@ -147,11 +157,13 @@ class Node:
                     "prev_log_index": self.next_index[node] - 1,
                     "prev_log_term": prev_log_term,
                 }
-                response = requests.get(f'http://{node}/append_entries', params=params, data=entries, timeout=timeout)
+                response = requests.post(f'http://{node}/append_entries', params=params, data=entries, timeout=timeout)
                 data = response.json()
-                if data.get('term') > self.storage.term():
-                    self.storage.set_term(self.storage.term())
-                if data.get('success'):
+                if self.validate_term(data.get('term')) and data.get('success'):
+                    self.match_index[node] = self.storage.last_index()
+                    self.next_index[node] = self.match_index[node] + 1
+                    self.commit_log()
+
                     with self.heartbeat_subscribe:
                         self.apply_count += 1
                         self.heartbeat_subscribe.notify_all()
@@ -174,7 +186,8 @@ class Node:
 
                 threads = []
                 for node in self.other_nodes:
-                    threads += threading.Thread(target=self.send_append_entries, args=(node, timeout), daemon=False)
+                    threads.append(threading.Thread(target=self.send_append_entries, args=(node, timeout), daemon=False))
+                    threads[-1].start()
 
                 for t in threads:
                     t.join()
@@ -185,6 +198,14 @@ class Node:
             time.sleep(timeout)
             if self.last_heartbeat + timeout < time.monotonic():
                 self.become_candidate()
+
+    def validate_term(self, term: int):
+        if term > self.storage.term():
+            self.storage.set_term(term)
+            self.storage.set_voted_for(None)
+            self.become_follower()
+            return False
+        return True
 
     def become_follower(self):
         self.state = "follower"
@@ -212,24 +233,32 @@ class Node:
             start_timestamp = time.monotonic()
             self.storage.set_term(self.storage.term() + 1)
             self.storage.set_voted_for(self.address)
-            votes = 1
+            votes = set(self.address)
             threads = []
             for node in self.other_nodes:
                 def request_vote_sender():
                     try:
+                        logging.info("Step 1")
                         url = f'http://{node}/request_vote'
-                        payload = {'term': self.term, 'candidate_id': self.address}
+                        last_index, last_term = self.storage.get_last_term()
+                        payload = {
+                            'term': self.storage.term(),
+                            'candidate_id': self.address,
+                            'last_log_index': last_index,
+                            'last_log_term': last_term,
+                        }
+                        logging.info("Step 2")
                         response = requests.post(url, json=payload, timeout=timeout)
-                        if response.json().get('term') > self.storage.term():
-                            self.become_follower()
-                            self.storage.set_term(response.json().get('term'))
-                            break
-                        vote_granted = response.json().get('vote_granted')
-                        if vote_granted:
-                            votes += 1
+                        if response.status_code != 200:
+                            raise RuntimeError(f"Message body: {response.content}")
+                        logging.info("Step 3")
+                        if self.validate_term(response.json()['term']) \
+                           and response.json()['vote_granted']:
+                            votes.add(node)
                     except Exception as e:
                         logging.warning(f"VoteRequest at term {self.storage.term()} to {node} failed: {e}")
-                threads += threading.Thread(target=request_vote_sender, daemon=False)
+                threads.append(threading.Thread(target=request_vote_sender, daemon=False))
+                threads[-1].start()
             for t in threads:
                 t.join()
 
@@ -237,17 +266,16 @@ class Node:
                 break
 
             if start_timestamp + timeout >= time.monotonic() and \
-               votes > (len(self.other_nodes) + 1) // 2:
+               len(votes) > (len(self.other_nodes) + 1) // 2:
                 self.become_leader()
                 break
-            else:
-                self.storage.set_voted_for(None)
-                logging.info(f"{self.address} failed to become master at term {self.storage.term()}")
+            logging.info(f"{self.address} failed to become master at term {self.storage.term()}")
 
 if __name__ == '__main__':
-    address = sys.argv[1]
-    port = int(sys.argv[2])
-    config = dict()
+    address = os.getenv('KV_ADDRESS')
+    port = int(os.getenv('KV_PORT'))
+    with open('config.json') as json_file:
+        config = json.load(json_file)
 
     logging.basicConfig(level=logging.INFO, filename=os.path.join(config["data_dir"], "log.txt"), filemode="w")
 

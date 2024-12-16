@@ -1,0 +1,39 @@
+services:
+  kv-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kv-1
+    environment:
+      - "KV_ADDRESS=kv-1:8081"
+      - "KV_PORT=8081"
+    volumes:
+      - ./test_dir/cluster_test/kv_1:/server/data
+    ports:
+      - "8081:8081"
+
+  kv-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kv-2
+    environment:
+      - "KV_ADDRESS=kv-2:8082"
+      - "KV_PORT=8082"
+    volumes:
+      - ./test_dir/cluster_test/kv_2:/server/data
+    ports:
+      - "8082:8082"
+
+  kv-3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kv-3
+    environment:
+      - "KV_ADDRESS=kv-3:8083"
+      - "KV_PORT=8083"
+    volumes:
+      - ./test_dir/cluster_test/kv_3:/server/data
+    ports:
+      - "8083:8083"
