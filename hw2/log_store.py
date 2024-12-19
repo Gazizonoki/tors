@@ -1,5 +1,6 @@
 import os
 import threading
+import logging
 
 
 class Storage:
@@ -12,11 +13,27 @@ class Storage:
         self.commit_index_file = os.open(os.path.join(data_dir, 'commit_index.txt'), flags, 0o666)
         self.last_applied = 0
         self.data_store = dict()
-        self.log_len = 0 # get real log len
+        self.data_dir = data_dir
+        self.log_len = 0
         self.log_lock = threading.Lock()
         self.term_lock = threading.Lock()
         self.voted_lock = threading.Lock()
         self.commit_index_lock = threading.Lock()
+
+        with self.log_lock:
+            while True:
+                entry = self.__get_entry_unsafe()
+                if len(entry) == 0:
+                    break
+                self.log_len += 1
+                if self.log_len <= self.commit_index():
+                    if entry['op_code'] == 0:
+                        logging.info(f"REC PUT: {entry['key']}, {entry['value']}")
+                        self.data_store[entry['key']] = entry['value']
+                    else:
+                        logging.info(f"REC DEL: {entry['key']}")
+                        del self.data_store[entry['key']]
+        logging.info(f"Recovered {self.log_len} entries")
 
     def set_term(self, term: int):
         with self.term_lock:

@@ -17,9 +17,13 @@ class TestLogStore(unittest.TestCase):
         shutil.rmtree(self.base_dir, ignore_errors=True)
         os.makedirs(self.base_dir, exist_ok=True)
     
-    def __make_storage(self):
-        path = self.base_dir + str(uuid.uuid4())
-        os.makedirs(path)
+    def __make_storage(self, store=None):
+        path = self.base_dir
+        if store is None:
+            path += str(uuid.uuid4())
+            os.makedirs(path)
+        else:
+            path = store
         return Storage(path)
 
     def __append_puts(self, storage: Storage):
@@ -108,14 +112,6 @@ class TestLogStore(unittest.TestCase):
         self.assertEqual(leader.data_store, data)
         self.assertEqual(replica.data_store, data)
 
-    # def test_aaa(self):
-    #     leader = self.__make_storage()
-    #     replica = self.__make_storage()
-    #     leader.append_put_to_log(1, b'50c416e3-0558-46c8-856a-6170b20a50bd', b'some_data')
-    #     leader.apply_entries(1)
-    #     replica.rewrite_log_tail(0, 0, 1, leader.get_log_tail(0)[1])
-    #     self.assertEqual(replica.data_store, {b'50c416e3-0558-46c8-856a-6170b20a50bd': b'some_data'})
-
     def test_replicate_log_fail(self):
         leader = self.__make_storage()
         replica = self.__make_storage()
@@ -135,13 +131,22 @@ class TestLogStore(unittest.TestCase):
         self.assertEqual(replica.data_store, {b'key1': b'3', b'key2': b'2', b'key4': b'5', b'key5': b'11'})
 
 
+    def test_recovery(self):
+        prev_store = self.__make_storage()
+        self.__append_mixed(prev_store)
+        prev_store.apply_entries(7)
+
+        cur_store = self.__make_storage(store=prev_store.data_dir)
+        self.assertEqual(cur_store.data_store, {b'key1': b'3', b'key2': b'2', b'key4': b'5'})
+
+
 class TestCluster(unittest.TestCase):
     def setUp(self):
         self.base_dir = './test_dir/cluster_test/'
         shutil.rmtree(self.base_dir, ignore_errors=True)
         os.makedirs(self.base_dir, exist_ok=True)
         subprocess.call(["docker", "compose", "up" ,"-d"])
-        time.sleep(3)
+        time.sleep(5)
 
     def __fix_location(self, host):
         o = urlparse(host)
@@ -211,10 +216,20 @@ class TestCluster(unittest.TestCase):
         data, code = self.__get_item("http://localhost:8081", id)
         self.assertEqual(code, 404, f"Message body: {data}, id: {id}")
 
+    def test_recovery(self):
+        id = self.__create_item("http://localhost:8081", b'some data')
+        subprocess.call(["docker", "compose", "stop"])
+        subprocess.call(["docker", "compose", "start"])
+        time.sleep(5)
+
+        data, code = self.__get_item("http://localhost:8081", id)
+        self.assertEqual(code, 200, f"Message body: {data}, id: {id}")
+        self.assertEqual(data, b'some data')
+
     def tearDown(self):
         subprocess.call(["docker", "compose", "down"])
 
 
 if __name__ == "__main__":
-    logging.basicConfig(stream=sys.stderr, level=logging.INFO)
+    logging.basicConfig(stream=sys.stderr, level=logging.WARN)
     unittest.main(failfast=True)
