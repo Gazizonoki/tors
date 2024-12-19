@@ -25,15 +25,15 @@ services:
     ports:
       - "8082:8082"
 
-  kv-3:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: kv-3
-    environment:
-      - "KV_ADDRESS=kv-3:8083"
-      - "KV_PORT=8083"
-    volumes:
-      - ./test_dir/cluster_test/kv_3:/server/data
-    ports:
-      - "8083:8083"
+  # kv-3:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: kv-3
+  #   environment:
+  #     - "KV_ADDRESS=kv-3:8083"
+  #     - "KV_PORT=8083"
+  #   volumes:
+  #     - ./test_dir/cluster_test/kv_3:/server/data
+  #   ports:
+  #     - "8083:8083"

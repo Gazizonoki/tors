@@ -9,13 +9,14 @@ class Storage:
         self.log_file = os.open(os.path.join(data_dir, 'wal.txt'), flags, 0o666)
         self.term_file = os.open(os.path.join(data_dir, 'term.txt'), flags, 0o666)
         self.voted_for_file = os.open(os.path.join(data_dir, 'voted_for.txt'), flags, 0o666)
-        self.commit_index = 0
+        self.commit_index_file = os.open(os.path.join(data_dir, 'commit_index.txt'), flags, 0o666)
         self.last_applied = 0
         self.data_store = dict()
         self.log_len = 0 # get real log len
         self.log_lock = threading.Lock()
         self.term_lock = threading.Lock()
         self.voted_lock = threading.Lock()
+        self.commit_index_lock = threading.Lock()
 
     def set_term(self, term: int):
         with self.term_lock:
@@ -47,7 +48,15 @@ class Storage:
             if len(data) == 0:
                 return None
             return data
-    
+
+    def commit_index(self):
+        with self.commit_index_lock:
+            os.lseek(self.commit_index_file, 0, os.SEEK_SET)
+            data = os.read(self.commit_index_file, os.path.getsize(self.commit_index_file)).decode()
+            if len(data) == 0:
+                return 0
+            return int(data)
+
     def last_index(self):
         return self.log_len
     
@@ -59,63 +68,68 @@ class Storage:
             cur_index = 1
             while cur_index < self.log_len:
                 if len(self.__get_entry_unsafe()) == 0:
-                    raise RuntimeError("Couldn't apply entries to store: log too small")
+                    raise RuntimeError(f"Couldn't apply entries to store: log too small ({self.log_len})")
                 cur_index += 1
             entry = self.__get_entry_unsafe()
             if len(entry) == 0:
-                raise RuntimeError("Couldn't apply entries to store: log too small")
+                raise RuntimeError(f"Couldn't apply entries to store: log too small ({self.log_len})")
             os.lseek(self.log_file, 0, os.SEEK_END)
-            return (self.log_len, entry['term'])
+            return (entry['term'], self.log_len)
 
     def append_put_to_log(self, term: int, key: bytes, value: bytes):
         with self.log_lock:
-            os.write(self.log_file, int.to_bytes(0, 1))
-            os.write(self.log_file, term.to_bytes(8))
-            os.write(self.log_file, len(key).to_bytes(8))
+            os.write(self.log_file, int(0).to_bytes(1, "big"))
+            os.write(self.log_file, term.to_bytes(8, "big"))
+            os.write(self.log_file, len(key).to_bytes(8, "big"))
             os.write(self.log_file, key)
-            os.write(self.log_file, len(value).to_bytes(8))
+            os.write(self.log_file, len(value).to_bytes(8, "big"))
             os.write(self.log_file, value)
             self.log_len += 1
+            return self.log_len
 
     def append_delete_to_log(self, term: int, key: bytes):
         with self.log_lock:
-            os.write(self.log_file, int.to_bytes(1, 1))
-            os.write(self.log_file, term.to_bytes(8))
-            os.write(self.log_file, len(key).to_bytes(8))
+            os.write(self.log_file, int(1).to_bytes(1, "big"))
+            os.write(self.log_file, term.to_bytes(8, "big"))
+            os.write(self.log_file, len(key).to_bytes(8, "big"))
             os.write(self.log_file, key)
             self.log_len += 1
+            return self.log_len
 
     def __get_entry_unsafe(self):
         result = dict()
         op_code = os.read(self.log_file, 1)
         if len(op_code) == 0:
             return dict()
-        result['op_code'] = int.from_bytes(op_code)
-        result['term'] = int.from_bytes(os.read(self.log_file, 8))
-        key_len = int.from_bytes(os.read(self.log_file, 8))
+        result['op_code'] = int.from_bytes(op_code, "big")
+        result['term'] = int.from_bytes(os.read(self.log_file, 8), "big")
+        key_len = int.from_bytes(os.read(self.log_file, 8), "big")
         result['key'] = os.read(self.log_file, key_len)
         if result['op_code'] == 0:
-            value_len = int.from_bytes(os.read(self.log_file, 8))
+            value_len = int.from_bytes(os.read(self.log_file, 8), "big")
             result['value'] = os.read(self.log_file, value_len)
         return result
 
     def __apply_entries_unsafe(self, new_commit_index):
-        self.commit_index = new_commit_index
+        with self.commit_index_lock:
+            os.lseek(self.commit_index_file, 0, os.SEEK_SET)
+            os.truncate(self.commit_index_file, 0)
+            os.write(self.commit_index_file, str(new_commit_index).encode())
         cur_index = 0
         while cur_index < self.last_applied:
             if len(self.__get_entry_unsafe()) == 0:
-                raise RuntimeError("Couldn't apply entries to store: log too small")
+                raise RuntimeError(f"Couldn't apply entries to store: log too small ({self.log_len})")
             cur_index += 1
-        while cur_index < self.commit_index:
+        while cur_index < self.commit_index():
             entry = self.__get_entry_unsafe()
             if len(entry) == 0:
-                raise RuntimeError("Couldn't apply entries to store: log too small")
+                raise RuntimeError(f"Couldn't apply entries to store: log too small ({self.log_len})")
             if entry['op_code'] == 0:
                 self.data_store[entry['key']] = entry['value']
             else:
                 del self.data_store[entry['key']]
             cur_index += 1
-        self.last_applied = self.commit_index
+        self.last_applied = self.commit_index()
 
     def apply_entries(self, new_commit_index):
         with self.log_lock:
@@ -149,9 +163,10 @@ class Storage:
                 if len(self.__get_entry_unsafe()) == 0:
                     break
                 self.log_len += 1
-            if self.commit_index < leader_commit:
+            new_commit_index = min(self.log_len, leader_commit)
+            if self.commit_index() < new_commit_index:
                 os.lseek(self.log_file, 0, os.SEEK_SET)
-                self.__apply_entries_unsafe(min(self.log_len, leader_commit))
+                self.__apply_entries_unsafe(new_commit_index)
             os.lseek(self.log_file, 0, os.SEEK_END)
             return True
 
@@ -165,7 +180,7 @@ class Storage:
                 term = entry['term']
                 if len(entry) == 0:
                     os.lseek(self.log_file, 0, os.SEEK_END)
-                    raise RuntimeError("Couldn't get log tail: log too small")
+                    raise RuntimeError(f"Couldn't apply entries to store: log too small ({self.log_len})")
                 cur_index += 1
             size = os.path.getsize(self.log_file) - os.lseek(self.log_file, 0, os.SEEK_CUR)
             return term, os.read(self.log_file, size)

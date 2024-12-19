@@ -6,6 +6,8 @@ import requests
 import uuid
 import time
 import logging
+import sys
+from urllib.parse import urlparse
 
 from log_store import Storage
 
@@ -106,6 +108,14 @@ class TestLogStore(unittest.TestCase):
         self.assertEqual(leader.data_store, data)
         self.assertEqual(replica.data_store, data)
 
+    # def test_aaa(self):
+    #     leader = self.__make_storage()
+    #     replica = self.__make_storage()
+    #     leader.append_put_to_log(1, b'50c416e3-0558-46c8-856a-6170b20a50bd', b'some_data')
+    #     leader.apply_entries(1)
+    #     replica.rewrite_log_tail(0, 0, 1, leader.get_log_tail(0)[1])
+    #     self.assertEqual(replica.data_store, {b'50c416e3-0558-46c8-856a-6170b20a50bd': b'some_data'})
+
     def test_replicate_log_fail(self):
         leader = self.__make_storage()
         replica = self.__make_storage()
@@ -131,17 +141,76 @@ class TestCluster(unittest.TestCase):
         shutil.rmtree(self.base_dir, ignore_errors=True)
         os.makedirs(self.base_dir, exist_ok=True)
         subprocess.call(["docker", "compose", "up" ,"-d"])
-        time.sleep(2)
+        time.sleep(3)
+
+    def __fix_location(self, host):
+        o = urlparse(host)
+        return o._replace(netloc="localhost:" + str(o.port)).geturl()
+
+    def __create_item(self, host, data):
+        resp = requests.post(host + "/items", data, allow_redirects=False)
+        if resp.status_code == 302:
+            new_loc = self.__fix_location(resp.headers['Location'])
+            resp = requests.post(new_loc, data, allow_redirects=False)
+        self.assertEqual(resp.status_code, 201, f"Message body: {resp.content}")
+        return resp.content.decode()
+
+    def __get_item(self, host, id):
+        resp = requests.get(host + "/items/" + id, allow_redirects=False)
+        if resp.status_code == 302:
+            new_loc = self.__fix_location(resp.headers['Location'])
+            resp = requests.get(new_loc, allow_redirects=False)
+        return resp.content, resp.status_code
+
+    def __put_item(self, host, id, data):
+        resp = requests.put(host + "/items/" + id, data=data, allow_redirects=False)
+        if resp.status_code == 302:
+            new_loc = self.__fix_location(resp.headers['Location'])
+            resp = requests.put(new_loc, data=data, allow_redirects=False)
+        self.assertEqual(resp.status_code, 200, f"Message body: {resp.content}, id: {id}")
+
+    def __delete_item(self, host, id):
+        resp = requests.delete(host + "/items/" + id, allow_redirects=False)
+        if resp.status_code == 302:
+            new_loc = self.__fix_location(resp.headers['Location'])
+            resp = requests.delete(new_loc, allow_redirects=False)
+        self.assertEqual(resp.status_code, 200, f"Message body: {resp.content}, id: {id}")
+
+    def test_election(self):
+        resp_1 = requests.get("http://localhost:8081/debug/leader")
+        self.assertEqual(resp_1.status_code, 200, f"Message body: {resp_1.content}")
+
+        resp_2 = requests.get("http://localhost:8082/debug/leader")
+        self.assertEqual(resp_2.status_code, 200, f"Message body: {resp_2.content}")
+
+        self.assertIn(resp_1.content, [b"kv-1:8081", b"kv-2:8082"])
+        self.assertEqual(resp_1.content, resp_2.content)
 
     def test_simple(self):
-        resp = requests.post("http://localhost:8081/items", b'some_data')
-        self.assertEqual(resp.status_code, 201, f"Message body: {resp.content}")
-        id = resp.content
-        logging.info(id)
+        id = self.__create_item("http://localhost:8081", b'some data')
+        time.sleep(0.5)
+
+        data, code = self.__get_item("http://localhost:8081", id)
+        self.assertEqual(code, 200, f"Message body: {data}, id: {id}")
+        self.assertEqual(data, b'some data')
+
+        self.__put_item("http://localhost:8081", id, b'another data')
+        time.sleep(0.5)
+
+        data, code = self.__get_item("http://localhost:8081", id)
+        self.assertEqual(code, 200, f"Message body: {data}, id: {id}")
+        self.assertEqual(data, b'another data')
+
+        self.__delete_item("http://localhost:8081", id)
+        time.sleep(0.5)
+
+        data, code = self.__get_item("http://localhost:8081", id)
+        self.assertEqual(code, 404, f"Message body: {data}, id: {id}")
 
     def tearDown(self):
         subprocess.call(["docker", "compose", "down"])
 
 
 if __name__ == "__main__":
-    unittest.main()
+    logging.basicConfig(stream=sys.stderr, level=logging.INFO)
+    unittest.main(failfast=True)

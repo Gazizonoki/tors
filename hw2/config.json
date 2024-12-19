@@ -1,12 +1,11 @@
 {
     "election_timeout_ms": 200,
-    "heartbeat_timeout_ms": 30,
-    "request_timeout_ms": 70,
-    "uncertainty_multiplier": 2,
+    "heartbeat_timeout_ms": 40,
+    "request_timeout_ms": 2000,
+    "uncertainty_multiplier": 3,
     "nodes": [
         "kv-1:8081",
-        "kv-2:8082",
-        "kv-3:8083"
+        "kv-2:8082"
     ],
     "data_dir": "./data"
 }
