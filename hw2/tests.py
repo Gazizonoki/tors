@@ -183,8 +183,12 @@ class TestCluster(unittest.TestCase):
         resp_2 = requests.get("http://localhost:8082/debug/leader")
         self.assertEqual(resp_2.status_code, 200, f"Message body: {resp_2.content}")
 
-        self.assertIn(resp_1.content, [b"kv-1:8081", b"kv-2:8082"])
+        resp_3 = requests.get("http://localhost:8082/debug/leader")
+        self.assertEqual(resp_3.status_code, 200, f"Message body: {resp_3.content}")
+
+        self.assertIn(resp_1.content, [b"kv-1:8081", b"kv-2:8082", b"kv-3:8083"])
         self.assertEqual(resp_1.content, resp_2.content)
+        self.assertEqual(resp_2.content, resp_3.content)
 
     def test_simple(self):
         id = self.__create_item("http://localhost:8081", b'some data')

@@ -5,7 +5,8 @@
     "uncertainty_multiplier": 3,
     "nodes": [
         "kv-1:8081",
-        "kv-2:8082"
+        "kv-2:8082",
+        "kv-3:8083"
     ],
     "data_dir": "./data"
 }
